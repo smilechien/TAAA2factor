@@ -1,1 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>TAAA Digital → Text Analyzer</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:24px;max-width:980px}
+    .card{border:1px solid #ddd;border-radius:14px;padding:16px;margin:14px 0;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    .small{color:#666}
+    input[type="text"]{width:100%;padding:10px;border:1px solid #ccc;border-radius:10px}
+    button{padding:10px 14px;border-radius:10px;border:1px solid #888;background:#111;color:#fff;cursor:pointer}
+    button.secondary{background:#fff;color:#111}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    code{background:#f6f6f6;padding:2px 6px;border-radius:6px}
+    .ok{color:#0a7a2f;font-weight:700}
+    .bad{color:#b00020;font-weight:700}
+    iframe{width:100%;height:70vh;border:1px solid #ddd;border-radius:12px;background:#fff}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .pill{display:inline-block;padding:2px 8px;border:1px solid #ddd;border-radius:999px;margin:2px 4px;background:#fafafa}
+  </style>
+</head>
+<body>
+  <h1>TAAA from Digital → Text</h1>
 
+  <div class="card">
+    <h2>Run</h2>
+
+    <div class="row">
+      <input id="file" type="file" accept=".csv,.tsv,.txt,.xlsx,.xls"/>
+      <label class="small">
+        <input id="enable_pred" type="checkbox" checked/>
+        Enable prediction-only dummy patient
+      </label>
+    </div>
+
+    <p class="small" style="margin-top:10px;">
+      Dummy patient values (comma-separated, in the same order as item columns).  
+      Example: <code>80,70,60,,72,55</code> (blank = skip)
+      <br/>
+      Leave empty → the pipeline will use the top-1 case from data (if your main.py implements it).
+    </p>
+    <input id="pred_seq" type="text" placeholder="e.g. 80,70,60,,72,55" />
+
+    <div class="small" style="margin-top:10px;">
+      Detected item column order (from uploaded CSV/TSV/TXT header):
+      <div id="colOrder"></div>
+      <div id="colNote" class="small"></div>
+    </div>
+
+    <div class="row" style="margin-top:10px;">
+      <button id="runUploadBtn" type="button">Run (Upload)</button>
+      <button id="runDemoBtn" type="button" class="secondary">Run Demo</button>
+      <span id="status" class="small">Status: Ready.</span>
+    </div>
+
+    <div id="links" class="small" style="margin-top:10px;"></div>
+    <pre id="debug" class="small mono" style="white-space:pre-wrap;margin-top:10px;"></pre>
+  </div>
+
+  <div class="card">
+    <h2>Report preview</h2>
+    <p class="small">After you run, the report will appear here.</p>
+    <iframe id="reportFrame" title="report preview"></iframe>
+  </div>
+
+<script>
+(() => {
+  const runUploadBtn = document.getElementById("runUploadBtn");
+  const runDemoBtn   = document.getElementById("runDemoBtn");
+  const statusEl     = document.getElementById("status");
+  const linksEl      = document.getElementById("links");
+  const debugEl      = document.getElementById("debug");
+  const frame        = document.getElementById("reportFrame");
+  const colOrderEl   = document.getElementById("colOrder");
+  const colNoteEl    = document.getElementById("colNote");
+
+  let detectedItemCols = [];
+
+  function setStatus(msg, cls="small"){
+    statusEl.className = cls;
+    statusEl.textContent = "Status: " + msg;
+  }
+  function setDebug(msg){ debugEl.textContent = msg || ""; }
+
+  async function pingServer(){
+    try{
+      const r = await fetch("/ping", {cache:"no-store"});
+      if(!r.ok) throw new Error("ping not ok: " + r.status);
+      const j = await r.json();
+      setDebug("Server OK (/ping)\n" + JSON.stringify(j, null, 2));
+    }catch(e){
+      // 如果 /ping 不存在，你會看到這裡
+      setStatus("Backend check failed. Make sure you run webapp.py and open http://127.0.0.1:8000/", "bad");
+      setDebug(String(e));
+    }
+  }
+
+  function renderCols(cols){
+    colOrderEl.innerHTML = cols.slice(0, 30).map(c => `<span class="pill">${c}</span>`).join("");
+    if(cols.length > 30){
+      colOrderEl.innerHTML += `<span class="pill">… (+${cols.length-30})</span>`;
+    }
+  }
+
+  // client-side detect header for CSV/TSV/TXT only (xlsx 無法簡單讀 header)
+  document.getElementById("file").addEventListener("change", async () => {
+    detectedItemCols = [];
+    colOrderEl.innerHTML = "";
+    colNoteEl.textContent = "";
+
+    const f = document.getElementById("file").files[0];
+    if(!f) return;
+
+    const name = (f.name || "").toLowerCase();
+    const ext = name.slice(name.lastIndexOf("."));
+
+    if(ext === ".csv" || ext === ".tsv" || ext === ".txt"){
+      const text = await f.text();
+      const firstLine = text.split(/\r?\n/)[0] || "";
+      const delim = (ext === ".tsv") ? "\t" : (firstLine.includes("\t") ? "\t" : ",");
+      const headers = firstLine.split(delim).map(s => s.trim());
+
+      // drop ID + Profile
+      const itemCols = headers.filter(h => {
+        const lh = h.toLowerCase();
+        return lh !== "id" && lh !== "profile" && h !== "";
+      });
+
+      detectedItemCols = itemCols;
+      renderCols(itemCols);
+      colNoteEl.textContent = itemCols.length
+        ? `Enter values in this order (${itemCols.length} items). Blank means skip.`
+        : "Could not detect item columns. (Need header row with column names.)";
+    }else{
+      colNoteEl.textContent = "For XLSX/XLS: column order will be inferred on server after upload.";
+    }
+  });
+
+  // restore last report
+  const last = localStorage.getItem("lastReportUrl");
+  if (last) frame.src = last;
+
+  async function runJob({useDemo}){
+    linksEl.innerHTML = "";
+    setDebug("");
+
+    const fd = new FormData();
+
+    if(useDemo){
+      fd.append("use_demo", "1");
+    }else{
+      const f = document.getElementById("file").files[0];
+      if(!f){ setStatus("Please choose a file first.", "bad"); return; }
+      fd.append("file", f);
+    }
+
+    fd.append("enable_pred", document.getElementById("enable_pred").checked ? "1" : "0");
+
+    // dummy patient values
+    const predSeq = (document.getElementById("pred_seq").value || "").trim();
+    if(predSeq) fd.append("pred_seq", predSeq);
+
+    runUploadBtn.disabled = true;
+    runDemoBtn.disabled   = true;
+    setStatus("Running…", "small");
+
+    try{
+      const resp = await fetch("/run", { method:"POST", body: fd });
+      const text = await resp.text();
+      let data = null;
+      try{ data = JSON.parse(text); }catch(_){}
+
+      if(!resp.ok || !data || !data.ok){
+        const errMsg = (data && (data.error || data.message)) ? (data.error || data.message)
+                      : ("HTTP " + resp.status + " (non-JSON response?)");
+        setStatus("Failed: " + errMsg, "bad");
+        setDebug("Raw response:\n" + text.slice(0, 6000));
+        if(data && data.log_url){
+          linksEl.innerHTML = `Log: <a href="${data.log_url}" target="_blank">${data.log_url}</a>`;
+        }
+        return;
+      }
+
+      setStatus("Success! Loading report…", "ok");
+      linksEl.innerHTML =
+        `Report: <a href="${data.report_url}" target="_blank">${data.report_url}</a><br/>` +
+        `Log: <a href="${data.log_url}" target="_blank">${data.log_url}</a>`;
+
+      // load preview (cache-bust)
+      const url = data.report_url + (data.report_url.includes("?") ? "&" : "?") + "t=" + Date.now();
+      frame.src = url;
+      localStorage.setItem("lastReportUrl", data.report_url);
+
+      if(data.stdout_tail) setDebug("stdout_tail:\n" + data.stdout_tail);
+
+    }catch(e){
+      setStatus("Error: " + e, "bad");
+      setDebug(String(e));
+    }finally{
+      runUploadBtn.disabled = false;
+      runDemoBtn.disabled   = false;
+    }
+  }
+
+  runUploadBtn.addEventListener("click", (e) => { e.preventDefault(); runJob({useDemo:false}); });
+  runDemoBtn.addEventListener("click",   (e) => { e.preventDefault(); runJob({useDemo:true});  });
+
+  pingServer();
+})();
+</script>
+</body>
+</html>
